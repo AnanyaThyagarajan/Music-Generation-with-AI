@@ -2,36 +2,13 @@ import streamlit as st
 import numpy as np
 import torch
 import torch
-import torch.nn as nn
-import numpy as np
 from torch.utils.data import Dataset, DataLoader
-import torch.optim as optim
+import torch.nn as nn
+from torch.utils.data import DataLoader
 import pandas as pd
-import matplotlib.pyplot as plt
 import re
-# Assuming model and other functions are properly imported or included here
 
-@st.cache(allow_output_mutation=True)
-#loading the vocabulary from a text 
-
-def load_vocab(file_path):
-    with open(file_path, 'r') as file:
-        vocab_words = file.read().splitlines()
-    return set(vocab_words)
-
-#loading and preparing the lyrics
-
-def loading_lyrics(file_path2):
-    lyrics_df2 = pd.read_parquet(file_path2)
-    return ' '.join(lyrics_df2['Lyrics_clean'].values)
-#filtering lyrics based on the vocab set
-
-def lyrics_filter(lyrics, vocab_set):
-    filtered = ' '.join([word if word.lower() in vocab_set else '' for word in re.findall(r'\b\w+\b', lyrics)])
-    return re.sub(r'\s+', ' ', filtered).strip()
-
-
-# Lyrics Dataset
+# Define the LyricsDataset class
 class LyricsDataset(Dataset):
     def __init__(self, text, seq_length):
         chars = sorted(list(set(text)))
@@ -47,48 +24,63 @@ class LyricsDataset(Dataset):
         return (torch.tensor(self.data[index:index+self.seq_length]),
                 torch.tensor(self.data[index+1:index+self.seq_length+1]))
 
-vocab_path = "C:\\Users\\Ananya\\anaconda3\\Dissertation - UL\\Music-Generation-with-AI-1\\Project\\data\\The_Oxford_3000.txt"
-lyrics_path = "C:\\Users\\Ananya\\anaconda3\\Dissertation - UL\\Music-Generation-with-AI-1\\Project\\data\\One_Direction_cleaned_lyrics.parquet"
-model_save_path = "C:\\Users\\Ananya\\anaconda3\\Dissertation - UL\\Music-Generation-with-AI-1\\Project\lstm_model_lyrics.pth"
+# Define the LSTM model
+class LSTMModel(nn.Module):
+    def __init__(self, vocab_size, embedding_dim, hidden_dim, num_layers):
+        super(LSTMModel, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.lstm = nn.LSTM(embedding_dim, hidden_dim, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, vocab_size)
 
-# loading vocab and lyrics
+    def forward(self, x, states):
+        x = self.embedding(x)
+        x, states = self.lstm(x, states)
+        x = self.fc(x)
+        return x, states
 
-vocab_set = load_vocab(vocab_path)
-all_lyrics = loading_lyrics(lyrics_path)
-all_lyrics_filt = lyrics_filter(all_lyrics, vocab_set)
+    def init_states(self, batch_size):
+        return (torch.zeros(self.num_layers, batch_size, self.hidden_dim).cuda(),
+                torch.zeros(self.num_layers, batch_size, self.hidden_dim).cuda())
 
-# Dataset and DataLoader
-seq_length = 100
-batch_size = 64
-dataset = LyricsDataset(all_lyrics_filt, seq_length)
-dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+# Load vocabulary
+@st.cache_data(allow_output_mutation=True)
+def load_vocab(file_path):
+    with open(file_path, 'r') as file:
+        vocab_words = file.read().splitlines()
+    return set(vocab_words)
 
+# Load and prepare lyrics
+@st.cache_data(allow_output_mutation=True)
+def load_lyrics(file_path):
+    lyrics_df = pd.read_parquet(file_path)
+    return ' '.join(lyrics_df['Lyrics_clean'].values)
+
+# Filter lyrics based on the vocabulary set
+def lyrics_filter(lyrics, vocab_set):
+    return ' '.join(word if word.lower() in vocab_set else '' for word in re.findall(r'\b\w+\b', lyrics)).strip()
+
+# Load model
+@st.cache_data(allow_output_mutation=True)
+def load_model(model_path, vocab_size, embedding_dim, hidden_dim, num_layers):
+    model = LSTMModel(vocab_size, embedding_dim, hidden_dim, num_layers).cuda()
+    model.load_state_dict(torch.load(model_path))
+    model.eval()
+    return model
+
+# Generate lyrics
 def generate_lyrics(model, start_str, int_to_char, char_to_int, length):
     model.eval()
     states = model.init_states(1)
-    input_indices = []
-
-    # Convert start string to lowercase to match training data
-    start_str = start_str.lower()
-
-    # Convert characters to indices safely
-    for ch in start_str:
-        if ch in char_to_int:
-            input_indices.append(char_to_int[ch])
-        else:
-            print(f'Character "{ch}" not in dictionary, skipping.')
-            continue  # Or handle unknown character
-
-    if not input_indices:
-        print("No valid characters to process.")
-        return ""
+    input_indices = [char_to_int[ch] for ch in start_str.lower() if ch in char_to_int]
 
     input_tensor = torch.tensor([input_indices]).cuda()
     text = start_str
 
     for _ in range(length):
         output, states = model(input_tensor, states)
-        output = output[:, -1, :]  # Get the last time step
+        output = output[:, -1, :]
         probabilities = torch.softmax(output, dim=1)
         char_id = torch.multinomial(probabilities, 1).item()
         char = int_to_char[char_id]
@@ -96,28 +88,6 @@ def generate_lyrics(model, start_str, int_to_char, char_to_int, length):
         input_tensor = torch.tensor([[char_id]]).cuda()
 
     return text
-def save_lyrics(lyrics, filename):
-    with open(filename, 'w') as file:
-        file.write(lyrics)
-
-def load_model():
-    # Dummy function to load and return the trained model, replace with your actual model loading
-    model = LSTMModel(vocab_size, embedding_dim, hidden_dim, num_layers).cuda()
-    model.load_state_dict(torch.load('model_save_path.pt'))  # Ensure model is saved and path is correct
-    model.eval()
-    return model
-
-# Function to generate text and insert names into the lyrics
-def insert_names_and_generate(model, start_str):
-    generated_lyrics = generate_lyrics(model, start_str, dataset.int_to_char, dataset.char_to_int, 1000)
-    names = ['Harry', 'Niall', 'Louis', 'Zayn', 'Liam']
-    np.random.shuffle(names)  # Shuffle names to distribute randomly
-    parts = np.array_split(generated_lyrics.split(), len(names))
-    lyrics_with_names = []
-    for name, part in zip(names, parts):
-        part.insert(0, name + ":")
-        lyrics_with_names.append(" ".join(part))
-    return "\n\n".join(lyrics_with_names)
 
 # Streamlit interface
 def main():
@@ -125,9 +95,16 @@ def main():
     user_input = st.text_input("Enter the starting words of the song:", "You are")
 
     if st.button('Generate Lyrics'):
-        model = load_model()
-        final_lyrics = insert_names_and_generate(model, user_input)
-        st.text_area("Generated Lyrics", value=final_lyrics, height=300, help="Generated lyrics with names distributed.")
+        vocab_path = "C:\\Users\\Ananya\\anaconda3\\Dissertation - UL\\Music-Generation-with-AI-1\\Project\\data\\The_Oxford_3000.txt"
+        lyrics_path = "C:\\Users\\Ananya\\anaconda3\\Dissertation - UL\\Music-Generation-with-AI-1\\Project\\data\\One_Direction_cleaned_lyrics.parquet"
+        model_path = "C:\\Users\\Ananya\\anaconda3\\Dissertation - UL\\Music-Generation-with-AI-1\\Project\lstm_model_lyrics.pth"
+        vocab_set = load_vocab(vocab_path)
+        all_lyrics = load_lyrics(lyrics_path)
+        all_lyrics_filt = lyrics_filter(all_lyrics, vocab_set)
+        dataset = LyricsDataset(all_lyrics_filt, 100)
+        model = load_model(model_path, len(dataset.char_to_int), 256, 512, 2)
+        final_lyrics = generate_lyrics(model, user_input, dataset.int_to_char, dataset.char_to_int, 1000)
+        st.text_area("Generated Lyrics", value=final_lyrics, height=300)
 
 if __name__ == '__main__':
-    main()
+    st.run(main())
